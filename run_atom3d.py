@@ -1,4 +1,5 @@
 import argparse
+import wandb
 
 parser = argparse.ArgumentParser()
 parser.add_argument('task', metavar='TASK', choices=[
@@ -42,9 +43,22 @@ from collections import defaultdict
 import scipy.stats as stats
 print = partial(print, flush=True)
 
-models_dir = 'models'
+models_dir = '/home/wpan/gvp-pytorch/models'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model_id = float(time.time())
+
+# Start a new wandb run to track this script.
+run = wandb.init(
+    # Set the wandb project where this run will be logged.
+    project="res",
+    # Track hyperparameters and run metadata.
+    config={
+        "learning_rate": args.lr,
+        "architecture": "ResGvp",
+        "dataset": "RES",
+        "epochs": args.epochs,
+    },
+)
 
 def main():
     datasets = get_datasets(args.task, args.lba_split)
@@ -86,6 +100,11 @@ def test(model, testset):
             func = partial(func, ids=ids)
         value = func(targets, predicts)
         print(f"{name}: {value}")
+        
+        # Log metrics to wandb.
+        run.log({
+            f"{name}": value,
+        })
 
 def train(model, trainset, valset):
                                 
@@ -95,27 +114,41 @@ def train(model, trainset, valset):
     
     for epoch in range(args.epochs):
         model.train()
-        loss = loop(trainset, model, optimizer=optimizer, max_time=args.train_time)
+        train_loss, train_acc = loop(trainset, model, optimizer=optimizer, max_time=args.train_time)
         path = f"{models_dir}/{args.task}_{model_id}_{epoch}.pt"
         torch.save(model.state_dict(), path)
-        print(f'\nEPOCH {epoch} TRAIN loss: {loss:.8f}')
+        print(f'\nEPOCH {epoch} TRAIN loss: {train_loss:.8f} acc: {train_acc:.2f}%')
         model.eval()
         with torch.no_grad():
-            loss = loop(valset, model, max_time=args.val_time)
-        print(f'\nEPOCH {epoch} VAL loss: {loss:.8f}')
-        if loss < best_val:
-            best_path, best_val = path, loss
+            val_loss, val_acc = loop(valset, model, max_time=args.val_time)
+        print(f'\nEPOCH {epoch} VAL loss: {val_loss:.8f} acc: {val_acc:.2f}%')
+        if val_loss < best_val:
+            best_path, best_val = path, val_loss
         print(f'BEST {best_path} VAL loss: {best_val:.8f}')
+        
+        # Log metrics to wandb.
+        run.log({
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc
+        })
     
 def loop(dataset, model, optimizer=None, max_time=None):
     start = time.time()
     
     loss_fn = get_loss(args.task)
     t = tqdm.tqdm(dataset)
+    metrics = get_metrics(args.task)
     total_loss, total_count = 0, 0
+    targets, predicts = [], []
     
     for batch in t:
         if max_time and (time.time() - start) > 60*max_time: break
+        
+        # Start timing this batch
+        batch_start_time = time.time()
+        
         if optimizer: optimizer.zero_grad()
         try:
             out = forward(model, batch, device)
@@ -130,6 +163,11 @@ def loop(dataset, model, optimizer=None, max_time=None):
         total_loss += float(loss_value)
         total_count += 1
         
+        # Get predictions
+        pred_class = out.argmax(dim=-1)
+        targets.extend(label.cpu().tolist())
+        predicts.extend(pred_class.cpu().tolist())
+        
         if optimizer:
             try:
                 loss_value.backward()
@@ -140,9 +178,21 @@ def loop(dataset, model, optimizer=None, max_time=None):
                 print('Skipped batch due to OOM', flush=True)
                 continue
             
+        # Calculate and print the time taken for this batch
+        batch_time = time.time() - batch_start_time
+        print(f"Batch {total_count} processing time: {batch_time:.4f} seconds")
+            
         t.set_description(f"{total_loss/total_count:.8f}")
         
-    return total_loss / total_count
+        # Log metrics to wandb.
+        run.log({
+            "loss": total_loss / total_count,
+            "accuracy": metrics['accuracy'](targets, predicts),
+            "batch_time": batch_time
+        })
+
+    accuracy = metrics['accuracy'](targets, predicts)
+    return total_loss / total_count, accuracy
 
 def load(model, path):
     params = torch.load(path)
@@ -205,7 +255,7 @@ def forward(model, batch, device):
 
 def get_datasets(task, lba_split=30):
     data_path = {
-        'RES' : 'atom3d-data/RES/raw/RES/data/',
+        'RES' : 'raw/RES/data/',
         'PPI' : 'atom3d-data/PPI/splits/DIPS-split/data/',
         'RSR' : 'atom3d-data/RSR/splits/candidates-split-by-time/data/',
         'PSR' : 'atom3d-data/PSR/splits/split-by-year/data/',
@@ -216,7 +266,7 @@ def get_datasets(task, lba_split=30):
     }[task]
         
     if task == 'RES':
-        split_path = 'atom3d-data/RES/splits/split-by-cath-topology/indices/'
+        split_path = 'indices/'
         dataset = partial(gvp.atom3d.RESDataset, data_path)        
         trainset = dataset(split_path=split_path+'train_indices.txt')
         valset = dataset(split_path=split_path+'val_indices.txt')
@@ -257,3 +307,5 @@ def get_model(task):
 
 if __name__ == "__main__":
     main()
+    # Finish the run and upload any remaining data.
+    run.finish()
