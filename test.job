@@ -1,11 +1,11 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_mig
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=ResGvp
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=9
-#SBATCH --time=120:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --time=04:00:00
 #SBATCH --output=/home/wpan/gvp-pytorch/outputs/slurm_output_%j.out
 
 export WANDB_API_KEY=6f62e8de47875e04cc5279883228dc25a454c816
@@ -14,4 +14,4 @@ module purge
 # Activate your environment
 source activate protein_eng
 # Run your code
-srun python /home/wpan/gvp-pytorch/run_atom3d.py RES
+srun python /home/wpan/gvp-pytorch/run_atom3d.py RES --test '/home/wpan/gvp-pytorch/models/RES_1744346358.2598014_44.pt'
